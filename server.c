@@ -1,102 +1,57 @@
-
+#include <pthread.h>
+#include <mta_rand.h>
+#include <mta_crypt.h>
+#include <ctype.h>
+#include <stdio.h>
+#include "shared.h"
 #include "server.h"
 
-
-void *encrypter_thread(void *arg){
-
-
-    ThreadArgs *args=(ThreadArgs*) arg;
-    SharedData *shared =args->shared;
-    int passLen=args->passLen;
-    int keyLen= passLen/8;
-    char *pass=malloc(passLen+1);
-    char *key=malloc(keyLen); // its binary data not a string so not need for +1 fkme
-    char *encrypetData=malloc(passLen*2 );
-    unsigned int encryLen=0; // for now we dont know its acullty size right now 
-
-    MTA_CRYPT_RET_STATUS res= MTA_crypt_init();
-    assert(res==MTA_CRYPT_RET_OK);
-    
-
-    if(!pass || !key || !encrypetData){
-        fprintf(stderr,"memorny alooction fail\n");
-        return NULL;
+void generate_printable_password(char *password, unsigned int length) {
+    for (unsigned int i = 0; i < length; i++) {
+        char c;
+        do {
+            c = MTA_get_rand_char();
+        } while (!isprint((unsigned char)c));
+        password[i] = c;
     }
-    while (1)
-    {
-        pthread_mutex_lock(&shared->lock);
+}
 
-        if(shared->shouldExit){
-            pthread_mutex_unlock(&shared->lock);
-            break;
-        }
-        struct timespec ts;
-        prepare_timespec(&ts, args->timeOutSec);
-        while (shared->newDataReady)
-        {
-            int rc=pthread_cond_timedwait(&shared->cond,&shared->lock,&ts);
-            if(rc == ETIMEDOUT)
-            {
-                printf("Timeout reach. Regentaing password... \n");
-                break;
-            }
+void* encrypter_thread_func(void* arg) {
+    SharedData* shared = (SharedData*)arg;
 
-        }
-        
+    while (1) {
+        pthread_mutex_lock(&shared->mutex);
 
-        createPrintablePass(pass,passLen);//cooking a pass
-        MTA_get_rand_data(key,keyLen);// coocking data
+        generate_printable_password(shared->password, shared->password_length);
+        MTA_get_rand_data(shared->key, shared->key_length);
 
-        res=MTA_encrypt(key,keyLen,pass,passLen,encrypetData, &encryLen);
-        assert(res==MTA_CRYPT_RET_OK);
-        memcpy(shared->encrypted_data,encrypetData, encryLen);
-        shared->data_len=encryLen;//encryLen was update in MTA_encrypt
-        shared->newDataReady=1;
+        unsigned int encrypted_length;
+        MTA_encrypt(shared->key, shared->key_length,
+                    shared->password, shared->password_length,
+                    shared->encrypted, &encrypted_length);
 
-        //notify the decrpyres 
+        shared->encrypted_length = encrypted_length;
+        shared->password_ready = true;
+        shared->password_decrypted = false;
+        shared->winner_id = -1;
+
+        log_server_info("New password generated: %.*s, key: %.*s, After encryption: %.*s",
+            shared->password_length, shared->password,
+            shared->key_length, shared->key,
+            shared->encrypted_length, shared->encrypted);
+
         pthread_cond_broadcast(&shared->cond);
-        pthread_mutex_unlock(&shared->lock);
 
-        printf("%ld\t[SERVER] [INFO] New password generated: %s,",time(NULL),pass );
-        print_bytes("key: ", key , keyLen);
-        print_bytes("After encryption :", encrypetData, encryLen);
-        printf("\n");
-
-        sleep(3);//might change later
-    }
-    free(pass);
-    free(key);
-    free(encrypetData);
-    
-return NULL;
-    
-    
-}
-void createPrintablePass(char *password, int len){
-
-    int i=0;
-    while(i<len)
-    {
-
-        char curr= MTA_get_rand_char();
-
-        if(curr >=33 && curr<= 126 )
-        {
-            password[i]=curr;
-            i++;
+        // Wait for a decrypter to set password_decrypted (someone cracked it)
+        while (!shared->password_decrypted) {
+            pthread_cond_wait(&shared->cond, &shared->mutex);
         }
+
+        log_server_ok("Password decrypted successfully by client %d, received(%.*s), is (%.*s)",
+            shared->winner_id, shared->password_length, shared->password, shared->password_length, shared->password);
+
+        shared->password_ready = false;
+        pthread_mutex_unlock(&shared->mutex);
     }
-    password[len]='\0';
-    
+    pthread_exit(NULL);
 }
-
-void print_bytes(const char* str,const char* data, int len ){
-
-    printf("%s",str);
-    for(int i=0; i<len ; i++)
-    {
-        putchar(isprint(data[i]) ? data[i] : '.' );
-    }
-}
-
-

@@ -1,9 +1,8 @@
 #ifndef SERVER_H
 #define SERVER_H
-#include"shared.h"
 
-void *encrypter_thread(void* arg);
-void createPrintablePass(char *password, int len);
-void print_bytes(const char* str,const char* data, int len);
+#include "shared.h"
 
-#endif
+void* encrypter_thread_func(void* arg);
+
+#endif // SERVER_H

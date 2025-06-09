@@ -1,71 +1,74 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <mta_crypt.h>
+#include <pthread.h>
 #include "shared.h"
+#include "server.h"
+#include "client.h"
 
-SharedData shared;
+int main(int argc, char *argv[]) {
+    int num_decrypters = -1;
+    int password_length = -1;
+    int timeout = 0;
 
-int main(int argc, char* argv[]) {
-    int numOfDecrypters = 0;
-    int passLen = 0;
-    int timeOut = 10;
-
-    // Parse command line arguments
+    // Simple manual parsing
     for (int i = 1; i < argc; i++) {
-        if ((strcmp(argv[i], "-n") == 0 || strcmp(argv[i], "--num-of-decrypters") == 0) && i + 1 < argc) {
-            numOfDecrypters = atoi(argv[++i]);
-        } else if ((strcmp(argv[i], "-l") == 0 || strcmp(argv[i], "--password-length") == 0) && i + 1 < argc) {
-            passLen = atoi(argv[++i]);
-        } else if ((strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--timeout") == 0) && i + 1 < argc) {
-            timeOut = atoi(argv[++i]);
-        } else {
-            printf("Invalid or incomplete argument: %s\n", argv[i]);
-            return 1;
+        if (strcmp(argv[i], "-n") == 0 && i+1 < argc) {
+            num_decrypters = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "-l") == 0 && i+1 < argc) {
+            password_length = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "-t") == 0 && i+1 < argc) {
+            timeout = atoi(argv[++i]);
         }
     }
 
-    if (numOfDecrypters <= 0 || passLen <= 0) {
-        printf("Usage: %s -n <numOfDecrypters> -l <passwordLength> [-t <timeout>]\n", argv[0]);
-        return 1;
+    if (num_decrypters <= 0 || password_length <= 0 || (password_length % 8 != 0)) {
+        fprintf(stderr, "Missing num of decrypters\n");
+        fprintf(stderr, "Usage: encrypt.out [-t|--timeout seconds] <-n|--num-of-decrypters <number>> <-l|--password-length <length>>\n");
+        exit(EXIT_FAILURE);
+    }
+    unsigned int key_length = password_length / 8;
+    if (key_length > MAX_KEY_LENGTH) {
+        fprintf(stderr, "Error: key_length exceeds max allowed size. Use smaller password_length.\n");
+        exit(EXIT_FAILURE);
     }
 
-    memset(&shared, 0, sizeof(shared));
-    pthread_mutex_init(&shared.lock, NULL);
-    pthread_cond_init(&shared.cond, NULL);
-
-    // Allocate encrypted_data buffer
-    shared.encrypted_data = malloc(passLen * 2);
-    if (!shared.encrypted_data) {
-        fprintf(stderr, "Failed to allocate encrypted_data buffer.\n");
-        return 1;
-    }
-
-    // Init encryption library
     if (MTA_crypt_init() != MTA_CRYPT_RET_OK) {
-        printf("Failed to initialize crypto.\n");
-        return 1;
+        fprintf(stderr, "Error: Failed to initialize crypto library.\n");
+        exit(EXIT_FAILURE);
     }
 
-    // Set up thread args
-    ThreadArgs *args = malloc(sizeof(ThreadArgs));
-    args->shared = &shared;
-    args->passLen = passLen;
-    args->timeOutSec = timeOut;
+    SharedData shared;
+    shared_init(&shared);
+    shared.password_length = password_length;
+    shared.key_length = key_length;
 
-    pthread_t enc_thread;
-    pthread_create(&enc_thread, NULL, encrypter_thread, args);
+    // Encrypter thread
+    pthread_t encrypter_thread;
+    if (pthread_create(&encrypter_thread, NULL, encrypter_thread_func, &shared) != 0) {
+        fprintf(stderr, "Error: Failed to create encrypter thread.\n");
+        exit(EXIT_FAILURE);
+    }
 
-    // Run server for 20 seconds
-    sleep(20);
+    // Decrypter threads
+    pthread_t* decrypter_threads = malloc(sizeof(pthread_t) * num_decrypters);
+    ClientArgs* client_args = malloc(sizeof(ClientArgs) * num_decrypters);
+    for (int i = 0; i < num_decrypters; i++) {
+        client_args[i].shared = &shared;
+        client_args[i].client_id = i;
+        if (pthread_create(&decrypter_threads[i], NULL, decrypter_thread_func, &client_args[i]) != 0) {
+            fprintf(stderr, "Error: Failed to create decrypter thread %d.\n", i);
+            exit(EXIT_FAILURE);
+        }
+    }
 
-    pthread_mutex_lock(&shared.lock);
-    shared.shouldExit = 1;
-    pthread_cond_broadcast(&shared.cond);
-    pthread_mutex_unlock(&shared.lock);
-
-    pthread_join(enc_thread, NULL);
-
-    pthread_mutex_destroy(&shared.lock);
-    pthread_cond_destroy(&shared.cond);
-    free(shared.encrypted_data);
-    free(args);
+    pthread_join(encrypter_thread, NULL);
+    for (int i = 0; i < num_decrypters; i++) {
+        pthread_cancel(decrypter_threads[i]);
+    }
+    free(decrypter_threads);
+    free(client_args);
 
     return 0;
 }
